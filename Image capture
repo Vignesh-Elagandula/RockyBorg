@@ -1,0 +1,15 @@
+#Install Camera Support.
+sudo apt update
+sudo apt install libcamera-apps
+
+# Enable camera
+sudo raspi-config
+# Go to: Interface Options → Camera → Enable
+# Then reboot:
+sudo reboot
+
+# Capture image 
+libcamera-jpeg -o image.jpg
+
+
+
