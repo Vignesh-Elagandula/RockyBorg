@@ -1,5 +1,5 @@
 import time
-import cv2
+import cv
 from picamera.array import PiRGBArray
 from picamera import PiCamera
 import RockyBorg
@@ -8,6 +8,8 @@ import RockyBorg
 RB = RockyBorg.RockyBorg()
 RB.Init()
 RB.SetCommsFailsafe(False)
+
+
 
 # Set motor power level
 POWER = 0.6
