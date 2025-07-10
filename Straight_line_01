@@ -1,0 +1,229 @@
+#!/usr/bin/env python3
+# RockyBorg Line Follower using PiCamera
+import cv2
+import numpy as np
+import time
+import sys
+from picamera2 import Picamera2
+from libcamera import controls
+
+# Add RockyBorg path - try multiple locations and names
+rockyborg_paths = [
+    '/home/pi/RockyBorg',
+    '/home/pi/rockyborg', 
+    '/opt/rockyborg',
+    '.'
+]
+
+RockyBorg = None
+for path in rockyborg_paths:
+    try:
+        sys.path.insert(0, path)
+        # Try different import methods
+        try:
+            # Method 1: Import specific class from module
+            import Rockyborg
+            if hasattr(Rockyborg, 'RockyBorg'):
+                RockyBorg = Rockyborg.RockyBorg
+                print(f"Rockyborg.RockyBorg class loaded from: {path}")
+                break
+            elif hasattr(Rockyborg, 'Rockyborg'):
+                RockyBorg = Rockyborg.Rockyborg  
+                print(f"Rockyborg.Rockyborg class loaded from: {path}")
+                break
+        except ImportError:
+            pass
+            
+        try:
+            # Method 2: Direct class import
+            from Rockyborg import RockyBorg
+            print(f"RockyBorg class loaded from: {path}")
+            break
+        except ImportError:
+            pass
+            
+        try:
+            # Method 3: Alternative names
+            from RockyBorg import RockyBorg
+            print(f"RockyBorg class loaded from: {path}")
+            break
+        except ImportError:
+            pass
+            
+    except Exception as e:
+        print(f"Error trying path {path}: {e}")
+        continue
+
+if RockyBorg is None:
+    print("ERROR: RockyBorg class not found!")
+    print("Let's check what's available in the module:")
+    try:
+        sys.path.insert(0, '/home/pi/RockyBorg')
+        import Rockyborg
+        print("Available attributes in Rockyborg module:")
+        print([attr for attr in dir(Rockyborg) if not attr.startswith('_')])
+    except Exception as e:
+        print(f"Could not import module: {e}")
+    sys.exit(1)
+
+def main():
+    # Initialize RockyBorg
+    print("Initializing RockyBorg...")
+    RB = RockyBorg()
+    RB.Init()
+    RB.SetCommsFailsafe(False)
+    RB.SetMotorsEnabled(True)
+    
+    # Initialize PiCamera
+    print("Initializing PiCamera...")
+    picam2 = Picamera2()
+    
+    # Configure camera for line detection
+    config = picam2.create_preview_configuration(
+        main={"size": (320, 240), "format": "RGB888"}
+    )
+    picam2.configure(config)
+    
+    # Set camera controls for better line detection
+    picam2.set_controls({
+        "ExposureTime": 10000,  # Fixed exposure for consistent lighting
+        "AnalogueGain": 1.0,    # Lower gain to reduce noise
+        "AwbEnable": False,     # Disable auto white balance
+        "AeEnable": False       # Disable auto exposure
+    })
+    
+    picam2.start()
+    time.sleep(2)  # Camera warm-up time
+    
+    # Line detection parameters
+    THRESHOLD_LOW = 40      # Lower threshold for black line detection
+    THRESHOLD_HIGH = 80     # Upper threshold 
+    MIN_LINE_AREA = 500     # Minimum area to consider as line
+    ROI_HEIGHT_RATIO = 0.4  # Look at bottom 40% of image
+    
+    # Motor control parameters
+    BASE_SPEED = 0.35
+    MAX_SPEED = 0.6
+    TURN_GAIN = 0.7
+    
+    # Motor direction settings
+    LEFT_MOTOR_INVERT = -1   # Adjust based on your motor wiring
+    RIGHT_MOTOR_INVERT = 1
+    
+    print("Starting line detection. Press Ctrl+C to stop.")
+    
+    try:
+        while True:
+            # Capture frame from PiCamera
+            frame = picam2.capture_array()
+            
+            # Convert to grayscale for line detection
+            gray = cv2.cvtColor(frame, cv2.COLOR_RGB2GRAY)
+            h, w = gray.shape
+            
+            # Define region of interest (bottom portion of image)
+            roi_start = int(h * (1 - ROI_HEIGHT_RATIO))
+            roi = gray[roi_start:h, 0:w]
+            
+            # Apply Gaussian blur to reduce noise
+            blurred = cv2.GaussianBlur(roi, (5, 5), 0)
+            
+            # Threshold to detect black line
+            # Using binary threshold to isolate dark areas
+            _, binary = cv2.threshold(blurred, THRESHOLD_LOW, 255, cv2.THRESH_BINARY_INV)
+            
+            # Apply morphological operations to clean up the image
+            kernel = np.ones((3, 3), np.uint8)
+            binary = cv2.morphologyEx(binary, cv2.MORPH_CLOSE, kernel)
+            binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel)
+            
+            # Find contours
+            contours, _ = cv2.findContours(binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            line_found = False
+            line_center = 0
+            
+            if contours:
+                # Find the largest contour (presumably the line)
+                largest_contour = max(contours, key=cv2.contourArea)
+                area = cv2.contourArea(largest_contour)
+                
+                if area > MIN_LINE_AREA:
+                    # Calculate the centroid of the line
+                    M = cv2.moments(largest_contour)
+                    if M["m00"] != 0:
+                        cx = int(M["m10"] / M["m00"])
+                        cy = int(M["m01"] / M["m00"])
+                        
+                        # Normalize line position to [-1, 1] range
+                        # -1 = far left, 0 = center, +1 = far right
+                        line_center = ((cx / w) * 2) - 1
+                        line_found = True
+                        
+                        # Visual feedback (optional - remove for headless operation)
+                        # Draw bounding rectangle around detected line
+                        x, y, cw, ch = cv2.boundingRect(largest_contour)
+                        cv2.rectangle(frame, (x, roi_start + y), 
+                                    (x + cw, roi_start + y + ch), (0, 255, 0), 2)
+                        
+                        # Draw center point
+                        cv2.circle(frame, (cx, roi_start + cy), 5, (0, 0, 255), -1)
+                        
+                        # Draw center line for reference
+                        cv2.line(frame, (w//2, 0), (w//2, h), (255, 0, 0), 1)
+            
+            # Motor control based on line detection
+            if line_found:
+                # Calculate steering error
+                error = line_center
+                
+                # PID-like control (just proportional for now)
+                turn_adjustment = error * TURN_GAIN
+                
+                # Calculate motor speeds
+                left_speed = BASE_SPEED + turn_adjustment
+                right_speed = BASE_SPEED - turn_adjustment
+                
+                # Limit speeds to maximum values
+                left_speed = np.clip(left_speed, -MAX_SPEED, MAX_SPEED)
+                right_speed = np.clip(right_speed, -MAX_SPEED, MAX_SPEED)
+                
+                # Apply motor directions and send to RockyBorg
+                RB.SetMotor1(left_speed * LEFT_MOTOR_INVERT)
+                RB.SetMotor2(right_speed * RIGHT_MOTOR_INVERT)
+                
+                # Status output
+                print(f"\rLine detected: Error={error:.2f}, Left={left_speed:.2f}, Right={right_speed:.2f}", end="")
+                
+            else:
+                # No line detected - stop or search behavior
+                RB.MotorsOff()
+                print("\rNo line detected - Stopped", end="")
+            
+            # Optional: Display image (comment out for headless operation)
+            cv2.imshow("Camera View", frame)
+            cv2.imshow("Binary Detection", binary)
+            
+            # Add ROI visualization
+            roi_display = cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+            cv2.imshow("Line Detection ROI", roi_display)
+            
+            # Small delay to prevent excessive CPU usage
+            time.sleep(0.05)  # 20 FPS
+            
+            # Break on 'q' key (only works if display is enabled)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+                
+    except KeyboardInterrupt:
+        print("\nStopping line follower...")
+        
+    finally:
+        # Cleanup
+        RB.MotorsOff()
+        picam2.stop()
+        cv2.destroyAllWindows()
+        print("Shutdown complete.")
+
+if _name_ == "_main_":
+    main()
